@@ -1,0 +1,22 @@
+# ─────────────────────────────────────────────────────────────────
+# vLLM model server – one per SLM agent
+# Build with:  docker build -f Dockerfile.vllm --build-arg MODEL_ID=... -t slm-<agent> .
+# ─────────────────────────────────────────────────────────────────
+FROM vllm/vllm-openai:latest
+
+ARG MODEL_ID
+ARG MAX_MODEL_LEN=8192
+ARG GPU_MEMORY_UTILIZATION=0.90
+
+ENV MODEL_ID=${MODEL_ID}
+ENV MAX_MODEL_LEN=${MAX_MODEL_LEN}
+ENV GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION}
+
+EXPOSE 8000
+
+ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]
+CMD ["--model", "${MODEL_ID}", \
+     "--max-model-len", "${MAX_MODEL_LEN}", \
+     "--gpu-memory-utilization", "${GPU_MEMORY_UTILIZATION}", \
+     "--host", "0.0.0.0", \
+     "--port", "8000"]

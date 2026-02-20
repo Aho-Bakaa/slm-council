@@ -1,0 +1,72 @@
+# ─────────────────────────────────────────────────────────────────
+# Vertex AI Agent Endpoint Configuration
+# ─────────────────────────────────────────────────────────────────
+# This file documents the target deployment configuration.
+# The actual deployment is handled by deploy_agents.py.
+# ─────────────────────────────────────────────────────────────────
+
+agents:
+  researcher:
+    display_name: "SLM Council – Tech Researcher"
+    model_id: "google/gemma-3-4b-it"
+    machine_type: "g2-standard-8"         # 1× NVIDIA L4 (24 GB)
+    accelerator_type: "NVIDIA_L4"
+    accelerator_count: 1
+    max_model_len: 8192
+    min_replicas: 1
+    max_replicas: 2
+    description: >
+      Scans technical documentation and APIs.
+      Outputs a structured Tech Manifest (JSON).
+
+  generator:
+    display_name: "SLM Council – Code Generator"
+    model_id: "Qwen/Qwen3-Coder-4B"
+    machine_type: "g2-standard-8"
+    accelerator_type: "NVIDIA_L4"
+    accelerator_count: 1
+    max_model_len: 8192
+    min_replicas: 1
+    max_replicas: 2
+    description: >
+      Writes clean, type-hinted production code.
+      Consumes the Tech Manifest as input.
+
+  debugger:
+    display_name: "SLM Council – Debugger"
+    model_id: "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B"
+    machine_type: "g2-standard-12"        # 7B model needs more RAM
+    accelerator_type: "NVIDIA_L4"
+    accelerator_count: 1
+    max_model_len: 8192
+    min_replicas: 1
+    max_replicas: 2
+    description: >
+      Chain-of-Thought bug hunter.
+      Traces logic and finds errors before compilation.
+
+  tester:
+    display_name: "SLM Council – Tester"
+    model_id: "microsoft/phi-4-mini-instruct"
+    machine_type: "g2-standard-8"
+    accelerator_type: "NVIDIA_L4"
+    accelerator_count: 1
+    max_model_len: 8192
+    min_replicas: 1
+    max_replicas: 2
+    description: >
+      Adversarial QA engineer.
+      Generates unit tests and identifies edge cases.
+
+orchestrator:
+  display_name: "SLM Council – Orchestrator"
+  # Deployed separately on Vertex AI as a larger model
+  model_id: "Qwen/Qwen3-235B-A22B"       # or Qwen3-Max via API
+  deployment_mode: "vertex_ai_endpoint"   # or "api_key" if using Qwen API
+  description: >
+    The central brain / project manager.
+    Decomposes tasks, synthesises reports, makes Go/No-Go decisions.
+
+cloud_build:
+  gateway_image: "gcr.io/${PROJECT_ID}/slm-council-gateway"
+  timeout: "1200s"

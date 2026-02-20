@@ -1,0 +1,45 @@
+# ─────────────────────────────────────────────────────────────────
+# Cloud Build – Build & push the gateway image, then deploy to Cloud Run
+# ─────────────────────────────────────────────────────────────────
+steps:
+  # Step 1: Build the gateway Docker image
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/slm-council/gateway:${SHORT_SHA}'
+      - '-t'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/slm-council/gateway:latest'
+      - '.'
+
+  # Step 2: Push to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '--all-tags'
+      - '${_REGION}-docker.pkg.dev/${PROJECT_ID}/slm-council/gateway'
+
+  # Step 3: Deploy to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'slm-council-gateway'
+      - '--image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/slm-council/gateway:${SHORT_SHA}'
+      - '--region=${_REGION}'
+      - '--platform=managed'
+      - '--port=8080'
+      - '--memory=2Gi'
+      - '--cpu=2'
+      - '--min-instances=0'
+      - '--max-instances=5'
+      - '--service-account=slm-council-sa@${PROJECT_ID}.iam.gserviceaccount.com'
+
+substitutions:
+  _REGION: us-central1
+
+timeout: '1200s'
+
+options:
+  logging: CLOUD_LOGGING_ONLY
