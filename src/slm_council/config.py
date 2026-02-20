@@ -64,23 +64,6 @@ class Settings(BaseSettings):
     tester_api_key: str = Field(default="", validation_alias="TESTER_API_KEY")
     tester_model: str = Field(default="phi-4-mini", validation_alias="TESTER_MODEL")
 
-    # ── New specialist agents ────────────────────────────────────────
-    planner_endpoint: str = Field(default="", validation_alias="PLANNER_ENDPOINT")
-    planner_api_key: str = Field(default="", validation_alias="PLANNER_API_KEY")
-    planner_model: str = Field(default="", validation_alias="PLANNER_MODEL")
-
-    reviewer_endpoint: str = Field(default="", validation_alias="REVIEWER_ENDPOINT")
-    reviewer_api_key: str = Field(default="", validation_alias="REVIEWER_API_KEY")
-    reviewer_model: str = Field(default="", validation_alias="REVIEWER_MODEL")
-
-    optimizer_endpoint: str = Field(default="", validation_alias="OPTIMIZER_ENDPOINT")
-    optimizer_api_key: str = Field(default="", validation_alias="OPTIMIZER_API_KEY")
-    optimizer_model: str = Field(default="", validation_alias="OPTIMIZER_MODEL")
-
-    refactorer_endpoint: str = Field(default="", validation_alias="REFACTORER_ENDPOINT")
-    refactorer_api_key: str = Field(default="", validation_alias="REFACTORER_API_KEY")
-    refactorer_model: str = Field(default="", validation_alias="REFACTORER_MODEL")
-
     # ── Compatibility aliases for older call-sites ───────────────────
     @property
     def orchestrator_model_name(self) -> str:
