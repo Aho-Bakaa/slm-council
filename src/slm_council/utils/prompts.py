@@ -60,7 +60,11 @@ Rules for task planning:
 - Assign each task a short ID like "t1", "t2", etc.
 - Use "dependencies" to declare which tasks must complete before this one starts.
 - Tasks with no dependencies (or whose dependencies are all met) run in parallel.
-- NOT every agent is needed. Simple tasks may only need 2-3 agents.
+Complexity guide (your "complexity" field controls which agents are allowed):
+- **simple** (utility functions, single algorithms, small helpers) → use ONLY researcher, generator, tester (3 agents max). Do NOT include planner, reviewer, debugger, optimizer, or refactorer.
+- **moderate** (multi-function modules, API endpoints, moderate logic) → use up to 6 agents: researcher, planner, generator, reviewer, debugger, tester. Skip optimizer and refactorer.
+- **complex** (full systems, multi-file projects, auth/db/async) → use any agents that add value, including optimizer and refactorer.
+- NOT every agent is needed — match effort to difficulty.
 - The **generator** must always be included.
 - Think about what ACTUALLY helps: a simple function doesn't need a planner or optimizer.
 
@@ -88,6 +92,7 @@ You have received the following reports from the council agents.
 {agent_reports}
 
 **Current refinement pass:** {current_pass} / {max_passes}
+{prior_history}
 
 Analyse ALL agent reports and decide:
 - If the code is correct, well-structured, and meets requirements → verdict = "APPROVE"
@@ -221,6 +226,13 @@ Rules:
 - If an Architecture Plan is provided, follow its file layout and component design.
 - Respond ONLY in the JSON schema provided.
 - Output raw JSON only (no markdown fences, no extra prose).
+
+CRITICAL JSON formatting rules:
+- All string values MUST use standard JSON double-quote escaping.
+- Inside "content" fields, use \\n for newlines, \\t for tabs, and \\" for quotes.
+- NEVER use Python triple-quotes (\"\"\") inside JSON strings.
+- Example of correct content: "content": "def foo():\\n    return 42\\n"
+- Example of WRONG content: "content": \"\"\"def foo():\n    return 42\"\"\"  ← NEVER do this.
 """
 
 GENERATOR_TASK = """\

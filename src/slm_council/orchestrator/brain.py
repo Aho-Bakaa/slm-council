@@ -13,6 +13,7 @@ import ast
 import json
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -45,6 +46,57 @@ from slm_council.utils.prompts import (
 )
 
 logger = get_logger(__name__)
+
+# ── Adaptive complexity profiles ──────────────────────────────────────
+# Each profile defines hich agents are allowed and the max refinement passes.
+# The orchestrator LLM classifies every request as simple/moderate/complex;
+# these profiles enforce hard budgets so small models can't over-plan.
+
+@dataclass(frozen=True)
+class ComplexityProfile:
+    """Agent-budget and pass-limit for a given task complexity."""
+    allowed_agents: frozenset[str]
+    max_passes: int
+
+
+COMPLEXITY_PROFILES: dict[str, ComplexityProfile] = {
+    "simple": ComplexityProfile(
+        allowed_agents=frozenset({"researcher", "generator", "tester"}),
+        max_passes=1,
+    ),
+    "moderate": ComplexityProfile(
+        allowed_agents=frozenset(
+            {"researcher", "planner", "generator", "reviewer", "debugger", "tester"}
+        ),
+        max_passes=2,
+    ),
+    "complex": ComplexityProfile(
+        allowed_agents=frozenset(
+            {
+                "researcher", "planner", "generator", "reviewer",
+                "debugger", "tester", "optimizer", "refactorer",
+            }
+        ),
+        # Issue #3: honour the user's configured max, don't hardcap
+        max_passes=settings.max_refinement_passes,
+    ),
+}
+
+# Fallback when the LLM returns an unrecognised or missing complexity value
+_DEFAULT_PROFILE_KEY = "moderate"
+
+
+@dataclass
+class DecomposeResult:
+    """Bundle returned by Orchestrator.decompose()."""
+    tasks: list[DAGTask]
+    complexity: str  # "simple" | "moderate" | "complex"
+    profile: ComplexityProfile = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.profile = COMPLEXITY_PROFILES.get(
+            self.complexity, COMPLEXITY_PROFILES[_DEFAULT_PROFILE_KEY]
+        )
 
 
 def _truncate_for_log(value: str) -> str:
@@ -133,15 +185,105 @@ class Orchestrator:
     # Phase 1 – Decompose user request into agent tasks
     # ─────────────────────────────────────────────────────────────────
 
-    async def decompose(self, request: UserRequest) -> list[DAGTask]:
-        """Ask the LLM to break the request into a DAG of agent tasks."""
-        prompt = ORCHESTRATOR_DECOMPOSE.format(
-            user_query=request.query,
-            language=request.language,
-        )
-        raw = await self._call_llm(prompt)
-        data = self._extract_json(raw)
+    # Agents whose failure should prevent dependents from running
+    _CRITICAL_AGENTS: frozenset[str] = frozenset({"generator"})
 
+    async def decompose(self, request: UserRequest) -> DecomposeResult:
+        """Ask the LLM to break the request into a DAG of agent tasks.
+
+        Returns a *DecomposeResult* containing the task list **and** the
+        complexity classification used for adaptive agent budgeting.
+
+        Includes retry-with-simplified-prompt on parse failure and a
+        hardcoded minimal fallback DAG as a last resort.
+        """
+        prompts = [
+            # Attempt 1: full structured prompt
+            ORCHESTRATOR_DECOMPOSE.format(
+                user_query=request.query,
+                language=request.language,
+            ),
+            # Attempt 2: stripped-down prompt (set lazily on failure)
+            None,
+        ]
+
+        data: dict[str, Any] | None = None
+        for attempt in range(2):
+            prompt = prompts[attempt]
+            if prompt is None:
+                prompt = self._simplified_decompose_prompt(request)
+            try:
+                raw = await self._call_llm(prompt)
+                data = self._extract_json(raw)
+                break
+            except (ValueError, KeyError) as exc:
+                logger.warning(
+                    "orchestrator.decompose_parse_failed",
+                    attempt=attempt + 1,
+                    error=str(exc),
+                )
+
+        # Last resort: hardcoded minimal DAG (matches the simple profile)
+        if data is None:
+            logger.warning("orchestrator.decompose_fallback")
+            data = {
+                "tasks": [
+                    {
+                        "id": "t1",
+                        "agent": "researcher",
+                        "instruction": f"Research technologies and approaches for: {request.query}",
+                        "dependencies": [],
+                    },
+                    {
+                        "id": "t2",
+                        "agent": "generator",
+                        "instruction": f"Implement the solution for: {request.query}",
+                        "dependencies": ["t1"],
+                    },
+                    {
+                        "id": "t3",
+                        "agent": "tester",
+                        "instruction": f"Write unit tests for the generated code for: {request.query}",
+                        "dependencies": ["t2"],
+                    },
+                ],
+                "complexity": "simple",
+            }
+
+        complexity = data.get("complexity", "unknown").lower().strip()
+
+        # Issue #6: Allow user to override the LLM's complexity decision
+        user_override = request.context.get("complexity")
+        if isinstance(user_override, str) and user_override.lower().strip() in COMPLEXITY_PROFILES:
+            logger.info(
+                "orchestrator.complexity_override",
+                llm_said=complexity,
+                user_override=user_override.lower().strip(),
+            )
+            complexity = user_override.lower().strip()
+
+        tasks = self._parse_dag_tasks(data)
+        self._assign_error_policies(tasks)
+        tasks = self._filter_by_complexity(tasks, complexity)
+
+        result = DecomposeResult(tasks=tasks, complexity=complexity)
+
+        logger.info(
+            "orchestrator.decomposed",
+            task_count=len(tasks),
+            complexity=complexity,
+            profile_max_passes=result.profile.max_passes,
+            allowed_agents=sorted(result.profile.allowed_agents),
+            agents=[t.agent for t in tasks],
+        )
+        return result
+
+    # ─────────────────────────────────────────────────────────────────
+    # Decompose helpers
+    # ─────────────────────────────────────────────────────────────────
+
+    def _parse_dag_tasks(self, data: dict[str, Any]) -> list[DAGTask]:
+        """Extract valid DAGTasks from orchestrator JSON, filtering bad roles."""
         tasks: list[DAGTask] = []
         valid_roles = {r.value for r in AgentRole if r != AgentRole.ORCHESTRATOR}
 
@@ -170,14 +312,73 @@ class Orchestrator:
                     dependencies=[t.id for t in tasks if t.agent == "researcher"],
                 )
             )
-
-        logger.info(
-            "orchestrator.decomposed",
-            task_count=len(tasks),
-            complexity=data.get("complexity", "unknown"),
-            agents=[t.agent for t in tasks],
-        )
         return tasks
+
+    def _assign_error_policies(self, tasks: list[DAGTask]) -> None:
+        """Set error_policy on each task based on agent criticality."""
+        for task in tasks:
+            task.error_policy = (
+                "abort" if task.agent in self._CRITICAL_AGENTS else "skip"
+            )
+
+    @staticmethod
+    def _filter_by_complexity(
+        tasks: list[DAGTask], complexity: str
+    ) -> list[DAGTask]:
+        """Enforce the complexity profile's agent budget.
+
+        Removes tasks whose agent is not in the profile's allowed set,
+        then fixes dangling dependency references.
+        """
+        profile = COMPLEXITY_PROFILES.get(
+            complexity, COMPLEXITY_PROFILES[_DEFAULT_PROFILE_KEY]
+        )
+        allowed = profile.allowed_agents
+
+        kept: list[DAGTask] = []
+        removed_labels: list[str] = []
+        for t in tasks:
+            if t.agent in allowed:
+                kept.append(t)
+            else:
+                removed_labels.append(f"{t.id}:{t.agent}")
+
+        if removed_labels:
+            logger.info(
+                "orchestrator.complexity_filter",
+                complexity=complexity,
+                removed=removed_labels,
+                remaining=[f"{t.id}:{t.agent}" for t in kept],
+            )
+
+        # Fix dangling dependency references
+        kept_ids = {t.id for t in kept}
+        for t in kept:
+            t.dependencies = [d for d in t.dependencies if d in kept_ids]
+
+        return kept
+
+    def _simplified_decompose_prompt(self, request: UserRequest) -> str:
+        """A bare-bones decomposition prompt used as retry fallback.
+
+        Issue #5: Includes complexity guidance so even the retry attempt
+        produces right-sized DAGs.
+        """
+        return (
+            "Break this coding task into agent sub-tasks.\n"
+            "Available agents: researcher, planner, generator, reviewer, "
+            "debugger, tester, optimizer, refactorer.\n\n"
+            "Complexity guide:\n"
+            "- simple (utility funcs, single algorithms): researcher + generator + tester ONLY\n"
+            "- moderate (multi-function, API endpoints): up to 6 agents (skip optimizer, refactorer)\n"
+            "- complex (full systems, auth/db/async): any agents that add value\n\n"
+            f"Task: {request.query}\n"
+            f"Language: {request.language}\n\n"
+            'Respond ONLY with JSON:\n'
+            '{"complexity": "simple|moderate|complex", '
+            '"tasks": [{"id": "t1", "agent": "researcher", "instruction": "...", "dependencies": []}, '
+            '{"id": "t2", "agent": "generator", "instruction": "...", "dependencies": ["t1"]}]}'
+        )
 
     # ─────────────────────────────────────────────────────────────────
     # Phase 3 – Synthesise & decide APPROVE / REFINE
@@ -187,8 +388,13 @@ class Orchestrator:
         self,
         session: CouncilSession,
         task_results: dict[str, DAGTaskResult],
+        prior_syntheses: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        """Evaluate all agent reports from the DAG and decide APPROVE or REFINE."""
+        """Evaluate all agent reports from the DAG and decide APPROVE or REFINE.
+
+        Gap D: *prior_syntheses* carries the orchestrator's own prior
+        verdicts / summaries so it remembers what it already tried.
+        """
 
         # Build a single aggregated report string for all agents
         report_parts: list[str] = []
@@ -225,11 +431,26 @@ class Orchestrator:
 
         agent_reports = "\n\n".join(report_parts) or "No agent reports available."
 
+        # Gap D: Build prior synthesis history string
+        history_text = ""
+        if prior_syntheses:
+            history_parts = []
+            for ps in prior_syntheses:
+                history_parts.append(
+                    f"- Pass {ps['pass']}: verdict={ps['verdict']}, "
+                    f"summary={ps['summary'][:200]}"
+                )
+            history_text = (
+                "\n\n**Your prior decisions (for context — do NOT repeat failed approaches):**\n"
+                + "\n".join(history_parts)
+            )
+
         prompt = ORCHESTRATOR_SYNTHESISE.format(
             user_query=session.request.query,
             agent_reports=agent_reports,
             current_pass=session.current_pass,
             max_passes=settings.max_refinement_passes,
+            prior_history=history_text,
         )
         raw = await self._call_llm(prompt)
         try:
@@ -278,8 +499,14 @@ class Orchestrator:
     def build_refinement_tasks(
         self,
         synthesis: dict[str, Any],
+        complexity: str = _DEFAULT_PROFILE_KEY,
     ) -> list[DAGTask]:
-        """Convert the LLM's synthesis refinement into DAGTasks for re-execution."""
+        """Convert the LLM's synthesis refinement into DAGTasks for re-execution.
+
+        Issue #1: the *complexity* parameter ensures refinement tasks are
+        filtered through the same complexity profile as the initial DAG,
+        preventing synthesis from sneaking in agents outside the budget.
+        """
         tasks: list[DAGTask] = []
         valid_roles = {r.value for r in AgentRole if r != AgentRole.ORCHESTRATOR}
 
@@ -306,6 +533,11 @@ class Orchestrator:
                     dependencies=[],
                 )
             )
+
+        self._assign_error_policies(tasks)
+
+        # Issue #1: Apply complexity filter to refinement tasks too
+        tasks = self._filter_by_complexity(tasks, complexity)
 
         return tasks
 
@@ -399,7 +631,7 @@ class Orchestrator:
             review_report=review_report,
             optimization_report=optimization_report,
             refactored_code=refactored_code,
-            refinement_passes=session.current_pass - 1,
+            refinement_passes=session.current_pass,
             total_duration_secs=round(total_duration, 2),
             summary=summary,
             agents_used=agents_used,

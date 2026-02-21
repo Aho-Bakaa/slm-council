@@ -32,6 +32,7 @@ class Settings(BaseSettings):
 
     # ── Rate limiting & caching ──────────────────────────────────────
     max_concurrent_agent_calls: int = Field(default=4, validation_alias="MAX_CONCURRENT_AGENT_CALLS")
+    agent_task_timeout_secs: float = Field(default=180.0, validation_alias="AGENT_TASK_TIMEOUT_SECS")
     enable_request_cache: bool = Field(default=True, validation_alias="ENABLE_REQUEST_CACHE")
     cache_ttl_secs: int = Field(default=300, validation_alias="CACHE_TTL_SECS")
 
@@ -64,6 +65,22 @@ class Settings(BaseSettings):
     tester_api_key: str = Field(default="", validation_alias="TESTER_API_KEY")
     tester_model: str = Field(default="phi-4-mini", validation_alias="TESTER_MODEL")
 
+    planner_endpoint: str = Field(default="", validation_alias="PLANNER_ENDPOINT")
+    planner_api_key: str = Field(default="", validation_alias="PLANNER_API_KEY")
+    planner_model: str = Field(default="qwen2.5:7b", validation_alias="PLANNER_MODEL")
+
+    reviewer_endpoint: str = Field(default="", validation_alias="REVIEWER_ENDPOINT")
+    reviewer_api_key: str = Field(default="", validation_alias="REVIEWER_API_KEY")
+    reviewer_model: str = Field(default="qwen2.5:7b", validation_alias="REVIEWER_MODEL")
+
+    optimizer_endpoint: str = Field(default="", validation_alias="OPTIMIZER_ENDPOINT")
+    optimizer_api_key: str = Field(default="", validation_alias="OPTIMIZER_API_KEY")
+    optimizer_model: str = Field(default="qwen2.5:7b", validation_alias="OPTIMIZER_MODEL")
+
+    refactorer_endpoint: str = Field(default="", validation_alias="REFACTORER_ENDPOINT")
+    refactorer_api_key: str = Field(default="", validation_alias="REFACTORER_API_KEY")
+    refactorer_model: str = Field(default="qwen2.5-coder:7b", validation_alias="REFACTORER_MODEL")
+
     # ── Compatibility aliases for older call-sites ───────────────────
     @property
     def orchestrator_model_name(self) -> str:
@@ -84,6 +101,22 @@ class Settings(BaseSettings):
     @property
     def tester_model_name(self) -> str:
         return self.tester_model
+
+    @property
+    def planner_model_name(self) -> str:
+        return self.planner_model
+
+    @property
+    def reviewer_model_name(self) -> str:
+        return self.reviewer_model
+
+    @property
+    def optimizer_model_name(self) -> str:
+        return self.optimizer_model
+
+    @property
+    def refactorer_model_name(self) -> str:
+        return self.refactorer_model
 
 
 settings = Settings()

@@ -10,7 +10,7 @@ def test_council_workflow():
     payload = {
         "query": "Create a java program to find if a string is palindrome or not",
         "language": "java",
-        "max_iterations": 6,
+        "max_iterations": 2,
     }
 
     print(f"Sending request to SLM Council...")

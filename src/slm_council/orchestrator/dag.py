@@ -21,7 +21,7 @@ from typing import Any
 import structlog
 
 from slm_council.agents.base import BaseAgent
-from slm_council.models import AgentResponse, AgentRole, ParsedAgentOutput
+from slm_council.models import AgentResponse, AgentRole, ParsedAgentOutput, TaskStatus
 
 logger = structlog.get_logger(__name__)
 
@@ -39,6 +39,7 @@ class DAGTask:
     agent: str  # lowercase role name: "researcher", "generator", …
     instruction: str
     dependencies: list[str] = field(default_factory=list)
+    error_policy: str = "skip"  # "skip" = continue on failure, "abort" = fail dependents
 
 
 @dataclass
@@ -168,6 +169,8 @@ class DAGExecutor:
         Optional concurrency limiter for API rate limiting.
     session_id : str
         Passed to agents for conversation memory.
+    task_timeout_secs : float
+        Per-task timeout.  Hung agents are killed after this duration.
     """
 
     def __init__(
@@ -175,17 +178,25 @@ class DAGExecutor:
         agents: dict[str, BaseAgent],
         semaphore: asyncio.Semaphore | None = None,
         session_id: str = "",
+        task_timeout_secs: float = 180.0,
     ) -> None:
         self.agents = agents
         self.semaphore = semaphore or asyncio.Semaphore(8)
         self.session_id = session_id
+        self.task_timeout_secs = task_timeout_secs
 
     async def execute(
         self,
         tasks: list[DAGTask],
         shared_context: dict[str, Any] | None = None,
     ) -> DAGExecutionResult:
-        """Run the full DAG and return aggregated results."""
+        """Run the full DAG and return aggregated results.
+
+        Failed tasks are tracked.  If a task with ``error_policy='abort'``
+        fails, all downstream dependents are automatically skipped.  Tasks
+        with ``error_policy='skip'`` fail silently — dependents still run
+        (just without that task's context contribution).
+        """
         validate_dag(tasks)
         waves = topological_waves(tasks)
 
@@ -193,27 +204,76 @@ class DAGExecutor:
         result = DAGExecutionResult()
         t0 = time.perf_counter()
 
+        # task_id → error_policy for every task that errored
+        failed_tasks: dict[str, str] = {}
+
         for wave_idx, wave in enumerate(waves):
-            wave_ids = [t.id for t in wave]
+            # ---- dependency-aware skip -----------------------------
+            runnable: list[DAGTask] = []
+            for task in wave:
+                should_skip = any(
+                    dep_id in failed_tasks
+                    and failed_tasks[dep_id] == "abort"
+                    for dep_id in task.dependencies
+                )
+                if should_skip:
+                    tr = DAGTaskResult(
+                        task_id=task.id,
+                        agent=task.agent,
+                        error="Skipped: critical dependency failed",
+                    )
+                    result.task_results[task.id] = tr
+                    result.errors.append(f"[{task.id}] skipped (dependency failure)")
+                    failed_tasks[task.id] = task.error_policy
+                    logger.warning(
+                        "dag.task_skipped",
+                        task_id=task.id,
+                        agent=task.agent,
+                        reason="dependency_failed",
+                    )
+                else:
+                    runnable.append(task)
+
+            if not runnable:
+                continue
+
+            wave_ids = [t.id for t in runnable]
             logger.info("dag.wave_start", wave=wave_idx, tasks=wave_ids)
             result.execution_order.append(wave_ids)
 
-            coros = [self._run_task(task, ctx) for task in wave]
+            coros = [self._run_task(task, ctx) for task in runnable]
             wave_results = await asyncio.gather(*coros, return_exceptions=True)
 
-            for task, tres in zip(wave, wave_results):
+            for task, tres in zip(runnable, wave_results):
                 if isinstance(tres, Exception):
+                    # Safety net — _run_task should not raise, but just in case
                     tr = DAGTaskResult(
                         task_id=task.id,
                         agent=task.agent,
                         error=str(tres),
                     )
                     result.errors.append(f"[{task.id}] {tres}")
-                    logger.error("dag.task_error", task_id=task.id, error=str(tres))
+                    failed_tasks[task.id] = task.error_policy
+                    logger.error(
+                        "dag.task_error",
+                        task_id=task.id,
+                        error=str(tres),
+                        policy=task.error_policy,
+                    )
                 else:
                     tr = tres
-                    # Feed output into context for downstream tasks
-                    self._update_context(ctx, task, tr)
+                    if tr.error:
+                        failed_tasks[task.id] = task.error_policy
+                        result.errors.append(f"[{task.id}] {tr.error}")
+                        logger.error(
+                            "dag.task_error",
+                            task_id=task.id,
+                            error=tr.error,
+                            policy=task.error_policy,
+                        )
+                    else:
+                        # Feed output into context for downstream tasks
+                        self._update_context(ctx, task, tr)
 
                 result.task_results[task.id] = tr
 
@@ -224,6 +284,7 @@ class DAGExecutor:
             tasks=len(tasks),
             elapsed=f"{result.total_elapsed:.2f}s",
             errors=len(result.errors),
+            failed=[tid for tid in failed_tasks],
         )
         return result
 
@@ -232,7 +293,11 @@ class DAGExecutor:
         task: DAGTask,
         ctx: dict[str, Any],
     ) -> DAGTaskResult:
-        """Execute a single task within the semaphore gate."""
+        """Execute a single task within the semaphore gate.
+
+        This method **never raises** — all exceptions (including timeouts)
+        are caught and returned as a ``DAGTaskResult`` with ``error`` set.
+        """
         agent = self.agents.get(task.agent)
         if agent is None:
             return DAGTaskResult(
@@ -245,13 +310,45 @@ class DAGExecutor:
             t0 = time.perf_counter()
             logger.info("dag.task_start", task_id=task.id, agent=task.agent)
 
-            response = await agent.run(
-                task_instruction=task.instruction,
-                session_id=self.session_id,
-                **ctx,
-            )
-            elapsed = time.perf_counter() - t0
+            try:
+                response = await asyncio.wait_for(
+                    agent.run(
+                        task_instruction=task.instruction,
+                        session_id=self.session_id,
+                        **ctx,
+                    ),
+                    timeout=self.task_timeout_secs,
+                )
+            except asyncio.TimeoutError:
+                elapsed = time.perf_counter() - t0
+                logger.error(
+                    "dag.task_timeout",
+                    task_id=task.id,
+                    agent=task.agent,
+                    timeout_secs=self.task_timeout_secs,
+                )
+                return DAGTaskResult(
+                    task_id=task.id,
+                    agent=task.agent,
+                    error=f"Task timed out after {self.task_timeout_secs:g}s",
+                    elapsed_seconds=elapsed,
+                )
+            except Exception as exc:
+                elapsed = time.perf_counter() - t0
+                logger.error(
+                    "dag.task_exception",
+                    task_id=task.id,
+                    agent=task.agent,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                return DAGTaskResult(
+                    task_id=task.id,
+                    agent=task.agent,
+                    error=f"{type(exc).__name__}: {exc}",
+                    elapsed_seconds=elapsed,
+                )
 
+            elapsed = time.perf_counter() - t0
             logger.info(
                 "dag.task_done",
                 task_id=task.id,
@@ -259,11 +356,22 @@ class DAGExecutor:
                 elapsed=f"{elapsed:.2f}s",
             )
 
+            parsed = getattr(response, "parsed_output", getattr(response, "parsed", None))
+            if response.status == TaskStatus.FAILED or response.error:
+                return DAGTaskResult(
+                    task_id=task.id,
+                    agent=task.agent,
+                    response=response,
+                    parsed=parsed,
+                    error=response.error or "Agent returned failed status",
+                    elapsed_seconds=elapsed,
+                )
+
             return DAGTaskResult(
                 task_id=task.id,
                 agent=task.agent,
                 response=response,
-                parsed=response.parsed_output,
+                parsed=parsed,
                 elapsed_seconds=elapsed,
             )
 
