@@ -44,7 +44,6 @@ class AgentRegistry:
     def __init__(self) -> None:
         self._agents: dict[AgentRole, type[BaseAgent]] = {}
 
-    # ── registration ─────────────────────────────────────────────────
 
     def register(self, role: AgentRole):  # type: ignore[no-untyped-def]
         """Class decorator that registers an agent under *role*."""
@@ -66,7 +65,6 @@ class AgentRegistry:
         """Imperative registration (alternative to decorator)."""
         self._agents[role] = cls
 
-    # ── lookup ───────────────────────────────────────────────────────
 
     def get(self, role: AgentRole) -> type[BaseAgent] | None:
         """Return the agent class for *role*, or ``None``."""
@@ -79,7 +77,6 @@ class AgentRegistry:
     def has(self, role: AgentRole) -> bool:
         return role in self._agents
 
-    # ── factory ──────────────────────────────────────────────────────
 
     def create(
         self,
@@ -123,5 +120,4 @@ class AgentRegistry:
         return f"AgentRegistry([{roles}])"
 
 
-# Module-level singleton – import this everywhere.
 registry = AgentRegistry()

@@ -49,7 +49,6 @@ class CodeGeneratorAgent(BaseAgent):
         )
 
     def parse_output(self, raw: str) -> GeneratedCode:
-        # ── Attempt 1: standard JSON extraction ─────────────────────
         try:
             data = self._extract_json(raw)
             files = [CodeFile(**f) for f in data.get("files", [])]
@@ -62,9 +61,6 @@ class CodeGeneratorAgent(BaseAgent):
         except Exception:
             pass
 
-        # ── Attempt 2: fix triple-quote corruption ──────────────────
-        # Small code models often emit Python triple-quotes inside JSON
-        # string values, e.g. "content": """..."""  instead of "content": "..."
         try:
             fixed = self._fix_triple_quotes(raw)
             data = self._extract_json(fixed)
@@ -79,8 +75,6 @@ class CodeGeneratorAgent(BaseAgent):
         except Exception:
             pass
 
-        # ── Attempt 3: regex extraction from raw output ─────────────
-        # Last resort: pull filenames and code from the raw text
         files = self._regex_extract_files(raw)
         if files:
             logger.info("generator.parse_recovered", method="regex_extraction", file_count=len(files))
@@ -90,7 +84,6 @@ class CodeGeneratorAgent(BaseAgent):
                 assumptions=["Output was not valid JSON; code extracted heuristically."],
             )
 
-        # ── Total failure ───────────────────────────────────────────
         logger.warning("generator.parse_failed", raw_preview=raw[:300])
         return GeneratedCode(
             files=[],
@@ -98,7 +91,6 @@ class CodeGeneratorAgent(BaseAgent):
             assumptions=[f"Raw output preview: {raw[:500]}..." if len(raw) > 500 else raw],
         )
 
-    # ── SLM output repair helpers ───────────────────────────────────
 
     @staticmethod
     def _fix_triple_quotes(text: str) -> str:
@@ -112,17 +104,13 @@ class CodeGeneratorAgent(BaseAgent):
         Strategy: textually replace both patterns with \\\"\\\"\\\" so the
         surrounding JSON becomes valid, then the caller re-parses.
         """
-        # Strip markdown fences first
         cleaned = text.strip()
         if cleaned.startswith("```"):
             lines = cleaned.splitlines()
             lines = [l for l in lines if not l.strip().startswith("```")]
             cleaned = "\n".join(lines)
 
-        # Replace full triple-quotes  """  →  \"\"\"
         cleaned = cleaned.replace('"""', '\\"\\"\\"')
-        # Replace partial-escape variant  ""\"  →  \"\"\"
-        # (safe: this 4-char sequence does not appear in well-formed JSON)
         cleaned = cleaned.replace('""\\"', '\\"\\"\\"')
 
         return cleaned
@@ -149,12 +137,10 @@ class CodeGeneratorAgent(BaseAgent):
                 if fname_pos == -1:
                     continue
 
-                # Find the "content" key after this filename
                 content_key = raw.find('"content"', fname_pos)
                 if content_key == -1:
                     continue
 
-                # Find the opening quote of the value
                 colon_pos = raw.find(":", content_key + 9)
                 if colon_pos == -1:
                     continue
@@ -162,8 +148,6 @@ class CodeGeneratorAgent(BaseAgent):
                 if val_start == -1:
                     continue
 
-                # Find end: the next JSON field transition after the content value.
-                # These markers are specific enough to avoid matching inside code.
                 best_end = -1
                 for end_marker in (
                     '",\n      "description"',
@@ -181,7 +165,6 @@ class CodeGeneratorAgent(BaseAgent):
 
                 code_raw = raw[val_start + 1 : best_end]
 
-                # Unescape JSON string escapes (order: literal backslash first)
                 code = (
                     code_raw.replace("\\\\", "\x00")
                     .replace("\\n", "\n")
@@ -203,7 +186,6 @@ class CodeGeneratorAgent(BaseAgent):
                         )
                     )
 
-        # Fallback: markdown code blocks (skip JSON ones)
         if not files:
             md_blocks = re.findall(
                 r"```(\w+)\n(.*?)```", raw, re.DOTALL

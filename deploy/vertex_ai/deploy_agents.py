@@ -29,7 +29,7 @@ class AgentSpec:
     model_id: str
     display_name: str
     port: int = 8000
-    machine_type: str = "g2-standard-8"       # 1× L4 GPU
+    machine_type: str = "g2-standard-8"       
     accelerator_type: str = "NVIDIA_L4"
     accelerator_count: int = 1
     min_replicas: int = 1
@@ -39,7 +39,6 @@ class AgentSpec:
     gpu_memory_utilization: float = 0.90
 
 
-# ── Agent definitions ────────────────────────────────────────────
 
 AGENTS: list[AgentSpec] = [
     AgentSpec(
@@ -56,7 +55,7 @@ AGENTS: list[AgentSpec] = [
         name="debugger",
         model_id="deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
         display_name="SLM Council – Debugger (DeepSeek-R1-Distill-Qwen-7B)",
-        machine_type="g2-standard-12",  # 7B needs a bit more RAM
+        machine_type="g2-standard-12",  
     ),
     AgentSpec(
         name="tester",
@@ -72,7 +71,6 @@ def deploy_agent(spec: AgentSpec, project: str, region: str) -> None:
     print(f"Deploying: {spec.display_name}")
     print(f"{'='*60}")
 
-    # 1. Upload model to registry
     env_vars = {
         "MODEL_ID": spec.model_id,
         "MAX_MODEL_LEN": str(spec.max_model_len),
@@ -97,13 +95,11 @@ def deploy_agent(spec: AgentSpec, project: str, region: str) -> None:
     )
     print(f"  Model uploaded: {model.resource_name}")
 
-    # 2. Create endpoint
     endpoint = aiplatform.Endpoint.create(
         display_name=f"slm-council-{spec.name}-endpoint",
     )
     print(f"  Endpoint created: {endpoint.resource_name}")
 
-    # 3. Deploy model to endpoint
     model.deploy(
         endpoint=endpoint,
         deployed_model_display_name=f"slm-council-{spec.name}-deployed",

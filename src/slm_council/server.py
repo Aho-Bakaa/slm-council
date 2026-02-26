@@ -19,9 +19,6 @@ from slm_council.utils.logging import get_logger, setup_logging
 logger = get_logger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────
-# Lifespan
-# ─────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
@@ -31,9 +28,6 @@ async def lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
     logger.info("server.shutdown")
 
 
-# ─────────────────────────────────────────────────────────────────
-# App
-# ─────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="SLM Coding Council",
@@ -50,9 +44,6 @@ app.add_middleware(
 )
 
 
-# ─────────────────────────────────────────────────────────────────
-# Request / response schemas
-# ─────────────────────────────────────────────────────────────────
 
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=1, description="The coding task or question.")
@@ -67,9 +58,6 @@ class HealthResponse(BaseModel):
     timestamp: str = ""
 
 
-# ─────────────────────────────────────────────────────────────────
-# Endpoints
-# ─────────────────────────────────────────────────────────────────
 @app.get("/")
 async def root():
     return {"message": "SLM Coding Council API is running", "docs": "/docs"}
@@ -105,7 +93,6 @@ async def run_council(req: QueryRequest) -> CouncilResult:
 @app.get("/config/agents")
 async def get_agent_config() -> dict[str, Any]:
     """Return the current agent endpoint configuration (no secrets)."""
-    # Dynamically build from config for all known agents
     agent_configs: dict[str, Any] = {}
     agent_names = [
         "researcher", "planner", "generator", "reviewer",

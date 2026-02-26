@@ -38,9 +38,6 @@ from slm_council.utils.logging import get_logger
 logger = get_logger(__name__)
 
 
-# ─────────────────────────────────────────────────────────────────
-# Health-score helper  (used by convergence gate)
-# ─────────────────────────────────────────────────────────────────
 
 _VERDICT_SCORE_MAP = {
     Verdict.PASS: 1.0,
@@ -97,7 +94,6 @@ def _compute_health_score(task_results: dict[str, DAGTaskResult]) -> float:
 
 def _ensure_agents_loaded() -> None:
     """Import all agent modules so they register with the registry."""
-    # Each import triggers the @registry.register decorator at module scope
     import slm_council.agents.researcher  
     import slm_council.agents.planner  
     import slm_council.agents.generator  
@@ -108,7 +104,6 @@ def _ensure_agents_loaded() -> None:
     import slm_council.agents.refactorer  
 
 
-# Agent config mapping: role name → (endpoint_setting, model_setting, api_key_setting)
 _AGENT_CONFIG_MAP: dict[str, tuple[str, str, str]] = {
     "researcher": ("researcher_endpoint", "researcher_model", "researcher_api_key"),
     "planner": ("planner_endpoint", "planner_model", "planner_api_key"),
@@ -160,7 +155,6 @@ class CouncilLoop:
             model=settings.orchestrator_model_name,
         )
 
-        # Create agents dynamically from registry + config
         self.agents: dict[str, BaseAgent] = {}
         for role_name in _AGENT_CONFIG_MAP:
             agent = _create_agent(role_name)
@@ -173,9 +167,6 @@ class CouncilLoop:
             registered_roles=[r.value for r in registry.available_roles()],
         )
 
-    # ─────────────────────────────────────────────────────────────────
-    # Public entry point
-    # ─────────────────────────────────────────────────────────────────
 
     async def run(self, request: UserRequest) -> CouncilResult:
         """Execute the full council pipeline for a user request."""
@@ -192,20 +183,20 @@ class CouncilLoop:
 
         logger.info("council.start", session_id=session.id, query=request.query[:80])
 
-        # Cumulative results across refinement passes
         all_task_results: dict[str, DAGTaskResult] = {}
         all_execution_order: list[list[str]] = []
         summary = ""
         prev_health: float = -1.0  # convergence gate seed
+        stall_count: int = 0        # consecutive stalls before we stop
+        _STALL_LIMIT = 2            # require N consecutive stalls
+        feedback_history: list[str] = []  # per-pass feedback blocks (windowed)
 
         try:
-            # Phase 1 – Orchestrator decomposes the task into a DAG
             decomposition = await self.orchestrator.decompose(request)
             dag_tasks = decomposition.tasks
             complexity = decomposition.complexity  # persist for refinement passes
             session.status = TaskStatus.IN_PROGRESS
 
-            # ── Adaptive pass limit from complexity profile ─────────
             profile_max = decomposition.profile.max_passes
             max_passes = min(max_passes, profile_max)
             logger.info(
@@ -217,22 +208,17 @@ class CouncilLoop:
                 agents=[t.agent for t in dag_tasks],
             )
 
-            # Build shared context from user request
             shared_ctx: dict[str, Any] = {
                 "language": request.language,
             }
 
-            # Create the DAG executor
             semaphore = asyncio.Semaphore(settings.max_concurrent_agent_calls)
 
-            # Orchestrator synthesis history (Gap D)
             prior_syntheses: list[dict[str, Any]] = []
 
-            # ── Iteration loop ──────────────────────────────────────
             for pass_num in range(1, max_passes + 1):
                 session.current_pass = pass_num
 
-                # ── Gap B: pass number available to every agent ─────
                 shared_ctx["pass_number"] = pass_num
 
                 logger.info(
@@ -242,14 +228,12 @@ class CouncilLoop:
                     task_count=len(dag_tasks),
                 )
 
-                # Filter tasks to only those we have agents for
                 executable_tasks = self._filter_executable(dag_tasks)
                 if not executable_tasks:
                     logger.error("council.no_executable_tasks", pass_number=pass_num)
                     summary = "No executable tasks — all required agents are unconfigured."
                     break
 
-                # Create the DAG executor
                 executor = DAGExecutor(
                     agents=self.agents,
                     semaphore=semaphore,
@@ -266,7 +250,6 @@ class CouncilLoop:
                     summary = f"DAG validation failed: {exc}"
                     break
 
-                # Merge results (later passes override earlier for same role)
                 all_task_results.update(dag_result.task_results)
                 all_execution_order.extend(dag_result.execution_order)
 
@@ -277,32 +260,36 @@ class CouncilLoop:
                         pass_number=pass_num,
                     )
 
-                # ── Convergence gate ───────────────────────────────
                 current_health = _compute_health_score(all_task_results)
                 logger.info(
                     "council.health",
                     score=round(current_health, 3),
                     previous=round(prev_health, 3),
                     pass_number=pass_num,
+                    stall_count=stall_count,
                 )
                 if pass_num > 1 and current_health <= prev_health:
+                    stall_count += 1
                     logger.info(
                         "council.convergence_stall",
                         current=round(current_health, 3),
                         previous=round(prev_health, 3),
                         pass_number=pass_num,
+                        stall_count=stall_count,
+                        stall_limit=_STALL_LIMIT,
                     )
-                    summary = (
-                        f"Convergence stall detected "
-                        f"(health {current_health:.2f} ≤ {prev_health:.2f}). "
-                        f"Stopping refinement after pass {pass_num}."
-                    )
-                    break
+                    if stall_count >= _STALL_LIMIT:
+                        summary = (
+                            f"Convergence stall detected "
+                            f"(health {current_health:.2f} ≤ {prev_health:.2f}, "
+                            f"{stall_count} consecutive stalls). "
+                            f"Stopping refinement after pass {pass_num}."
+                        )
+                        break
+                else:
+                    stall_count = 0
                 prev_health = current_health
 
-                # Issue #2: skip synthesis when this is the last allowed
-                # pass — avoids a wasted LLM call for single-pass (simple)
-                # tasks and for the final pass of any tier.
                 if pass_num >= max_passes:
                     has_code = self._has_generated_code(all_task_results)
                     if has_code:
@@ -315,9 +302,6 @@ class CouncilLoop:
                         logger.warning("council.no_code_final_pass", pass_number=pass_num)
                     break
 
-                # Phase 2 – Orchestrator synthesises all results
-                # Gap D: pass prior synthesis history so orchestrator
-                # knows what it previously decided / asked to fix
                 synthesis = await self.orchestrator.synthesise(
                     session, all_task_results, prior_syntheses=prior_syntheses
                 )
@@ -326,14 +310,15 @@ class CouncilLoop:
                 verdict = Verdict.from_string(verdict_raw)
                 summary = synthesis.get("summary", "")
 
-                # Gap D: remember this synthesis for future passes
                 prior_syntheses.append({
                     "pass": pass_num,
                     "verdict": verdict_raw,
                     "summary": summary,
                 })
+                _mem = settings.agent_memory_window
+                if len(prior_syntheses) > _mem:
+                    prior_syntheses = prior_syntheses[-_mem:]
 
-                # Safety: check we actually have generated code
                 has_code = self._has_generated_code(all_task_results)
 
                 if verdict == Verdict.PASS and has_code:
@@ -343,32 +328,31 @@ class CouncilLoop:
                     logger.warning("council.approve_without_code", pass_number=pass_num)
                     verdict = Verdict.PARTIAL
 
-                # REFINE – get new tasks for next pass
                 logger.info("council.refine", pass_number=pass_num)
                 dag_tasks = self.orchestrator.build_refinement_tasks(
                     synthesis, complexity=complexity
                 )
 
-                # ── Gap A: inject refinement feedback into shared_ctx ──
-                # The orchestrator's synthesis summary + refinement
-                # instructions become the feedback for the next pass.
                 refinement_instructions = []
                 for rt in synthesis.get("refinement_tasks", []):
                     agent = rt.get("agent", "?")
                     instr = rt.get("instruction", "")
                     refinement_instructions.append(f"- [{agent}] {instr}")
 
-                shared_ctx["refinement_feedback"] = (
+                feedback_block = (
                     f"Orchestrator verdict (pass {pass_num}): {verdict_raw}\n"
                     f"Summary: {summary}\n"
                     f"Refinement instructions:\n"
                     + "\n".join(refinement_instructions)
                 )
+                feedback_history.append(feedback_block)
+                _mem = settings.agent_memory_window
+                if len(feedback_history) > _mem:
+                    feedback_history = feedback_history[-_mem:]
+                shared_ctx["refinement_feedback"] = (
+                    "\n---\n".join(feedback_history)
+                )
 
-                # ── Gap C: clear stale agent outputs from shared_ctx ──
-                # Keep only durable context (language, refinement_feedback,
-                # pass_number) and generated code. Remove stale reports
-                # from agents that won't re-run this pass.
                 next_agents = {t.agent for t in dag_tasks}
                 stale_keys = [
                     k for k in list(shared_ctx)
@@ -377,26 +361,21 @@ class CouncilLoop:
                 for k in stale_keys:
                     del shared_ctx[k]
 
-                # Clear role-specific feedback if that role is re-running
-                # (so it generates fresh output, not re-reads its own stale context)
                 if "reviewer" in next_agents:
                     shared_ctx.pop("review_feedback", None)
                 if "debugger" in next_agents:
                     shared_ctx.pop("debug_feedback", None)
 
-                # Inject refinement context into task instructions
                 for task in dag_tasks:
                     task.instruction = (
                         f"[Refinement pass {pass_num + 1}] {task.instruction}"
                     )
 
             else:
-                # Exhausted all passes
                 logger.warning("council.max_passes_reached", max=max_passes)
                 if not summary:
                     summary = "Max refinement passes reached."
 
-            # ── Build final result ──────────────────────────────────
             elapsed = time.perf_counter() - t0
             session.status = TaskStatus.COMPLETED
             session.completed_at = datetime.now(timezone.utc)
@@ -423,9 +402,6 @@ class CouncilLoop:
         finally:
             await self._close_all()
 
-    # ─────────────────────────────────────────────────────────────────
-    # Helpers
-    # ─────────────────────────────────────────────────────────────────
 
     def _filter_executable(self, tasks: list[DAGTask]) -> list[DAGTask]:
         """Remove tasks for agents we don't have, and fix dangling deps."""
@@ -433,7 +409,6 @@ class CouncilLoop:
         executable = [t for t in tasks if t.agent in available]
         executable_ids = {t.id for t in executable}
 
-        # Fix deps that reference removed tasks
         for t in executable:
             t.dependencies = [d for d in t.dependencies if d in executable_ids]
 

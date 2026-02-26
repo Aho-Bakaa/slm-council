@@ -11,8 +11,10 @@ downstream tasks can reference upstream results.
 
 from __future__ import annotations
 
+import ast as _ast
 import asyncio
 import json
+import textwrap
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -26,9 +28,6 @@ from slm_council.models import AgentResponse, AgentRole, ParsedAgentOutput, Task
 logger = structlog.get_logger(__name__)
 
 
-# ────────────────────────────────────────────────────────────────────
-# Data Structures
-# ────────────────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -40,6 +39,7 @@ class DAGTask:
     instruction: str
     dependencies: list[str] = field(default_factory=list)
     error_policy: str = "skip"  # "skip" = continue on failure, "abort" = fail dependents
+    extra_context: list[str] = field(default_factory=list)  # orchestrator-hinted keys
 
 
 @dataclass
@@ -64,9 +64,6 @@ class DAGExecutionResult:
     errors: list[str] = field(default_factory=list)
 
 
-# ────────────────────────────────────────────────────────────────────
-# Validation helpers
-# ────────────────────────────────────────────────────────────────────
 
 
 class DAGValidationError(Exception):
@@ -77,7 +74,6 @@ def validate_dag(tasks: list[DAGTask]) -> None:
     """Check for missing references, duplicates, and cycles."""
     ids = {t.id for t in tasks}
 
-    # Duplicate IDs
     if len(ids) != len(tasks):
         seen: set[str] = set()
         dupes = []
@@ -87,7 +83,6 @@ def validate_dag(tasks: list[DAGTask]) -> None:
             seen.add(t.id)
         raise DAGValidationError(f"Duplicate task IDs: {dupes}")
 
-    # Missing dependency references
     for t in tasks:
         missing = set(t.dependencies) - ids
         if missing:
@@ -95,7 +90,6 @@ def validate_dag(tasks: list[DAGTask]) -> None:
                 f"Task '{t.id}' references unknown dependencies: {missing}"
             )
 
-    # Cycle detection via Kahn's algorithm
     in_degree: dict[str, int] = {t.id: 0 for t in tasks}
     adj: dict[str, list[str]] = defaultdict(list)
     for t in tasks:
@@ -117,9 +111,6 @@ def validate_dag(tasks: list[DAGTask]) -> None:
         raise DAGValidationError("Task graph contains a cycle")
 
 
-# ────────────────────────────────────────────────────────────────────
-# Topological wave computation
-# ────────────────────────────────────────────────────────────────────
 
 
 def topological_waves(tasks: list[DAGTask]) -> list[list[DAGTask]]:
@@ -153,9 +144,132 @@ def topological_waves(tasks: list[DAGTask]) -> list[list[DAGTask]]:
     return waves
 
 
-# ────────────────────────────────────────────────────────────────────
-# DAG Executor
-# ────────────────────────────────────────────────────────────────────
+
+_ALWAYS_KEYS = {"query", "language", "complexity_profile"}
+
+_BASE_CONTEXT: dict[str, set[str]] = {
+    "researcher":  {"query", "language"},
+    "planner":     {"query", "language", "tech_manifest", "research_summary"},
+    "generator":   {"query", "language", "complexity_profile", "research_summary",
+                    "architecture_plan", "tech_manifest", "refinement_feedback",
+                    "review_feedback", "test_feedback"},
+    "tester":      {"query", "language", "code", "generated_code"},
+    "reviewer":    {"query", "language", "code", "generated_code", "test_results",
+                    "test_feedback"},
+    "debugger":    {"query", "code", "generated_code", "test_results",
+                    "test_feedback", "review_feedback"},
+    "refactorer":  {"query", "code", "generated_code", "review_feedback",
+                    "debug_feedback", "test_feedback"},
+    "optimizer":   {"query", "code", "generated_code", "review_feedback"},
+}
+
+_CODE_CAP = 8000
+_REPORT_CAP = 4000
+
+
+def _project_ctx(
+    ctx: dict[str, Any],
+    agent: str,
+    extra_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    """Layer 1: Return a filtered copy of *ctx* with only the keys the agent needs."""
+    allowed = _BASE_CONTEXT.get(agent, _ALWAYS_KEYS) | _ALWAYS_KEYS
+    if extra_keys:
+        allowed = allowed | set(extra_keys)
+    return {k: v for k, v in ctx.items() if k in allowed}
+
+
+def _cap_value(value: Any) -> Any:
+    """Layer 2: Structurally cap a single context value if it exceeds thresholds."""
+    if not isinstance(value, str):
+        return value
+    length = len(value)
+
+    if length > _CODE_CAP and ("\ndef " in value or "\nclass " in value or "import " in value):
+        skeleton = _ast_skeleton(value)
+        if skeleton and len(skeleton) < length:
+            return skeleton
+
+    if length > _REPORT_CAP and value.lstrip().startswith("{"):
+        capped = _cap_manifest(value)
+        if capped and len(capped) < length:
+            return capped
+
+    if length > _CODE_CAP:
+        return value[:_CODE_CAP] + "\n[\u2026truncated]"
+
+    return value
+
+
+def _ast_skeleton(source: str) -> str | None:
+    """Reduce Python source to signatures + docstrings (bodies → ``...``)."""
+    parts: list[str] = []
+    for block in source.split("\n# "):
+        skeleton = _ast_skeleton_single(block if not parts else "# " + block)
+        if skeleton:
+            parts.append(skeleton)
+    return "\n\n".join(parts) if parts else None
+
+
+def _ast_skeleton_single(source: str) -> str | None:
+    """AST skeleton for a single code block."""
+    try:
+        tree = _ast.parse(source)
+    except SyntaxError:
+        return None
+    lines: list[str] = []
+    for node in _ast.iter_child_nodes(tree):
+        if isinstance(node, (_ast.Import, _ast.ImportFrom)):
+            lines.append(_ast.get_source_segment(source, node) or "")
+        elif isinstance(node, _ast.ClassDef):
+            sig = f"class {node.name}:"  # decorators omitted for brevity
+            lines.append(sig)
+            ds = _ast.get_docstring(node)
+            if ds:
+                lines.append(f'    """{ds}"""')
+            for item in node.body:
+                if isinstance(item, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                    fn_src = _ast.get_source_segment(source, item)
+                    if fn_src:
+                        first_line = fn_src.split("\n")[0]
+                        lines.append(f"    {first_line}")
+                        ds2 = _ast.get_docstring(item)
+                        if ds2:
+                            lines.append(f'        """{ds2}"""')
+                        lines.append("        ...")
+        elif isinstance(node, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+            fn_src = _ast.get_source_segment(source, node)
+            if fn_src:
+                first_line = fn_src.split("\n")[0]
+                lines.append(first_line)
+                ds = _ast.get_docstring(node)
+                if ds:
+                    lines.append(f'    """{ds}"""')
+                lines.append("    ...")
+    return "\n".join(lines) if lines else None
+
+
+def _cap_manifest(json_text: str) -> str | None:
+    """Keep JSON keys but truncate long string values."""
+    try:
+        obj = json.loads(json_text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+    def _trim(v: Any, depth: int = 0) -> Any:
+        if isinstance(v, str) and len(v) > 300:
+            return v[:300] + "[\u2026]"
+        if isinstance(v, dict):
+            return {k: _trim(val, depth + 1) for k, val in v.items()}
+        if isinstance(v, list) and len(v) > 10:
+            return [_trim(i, depth + 1) for i in v[:10]] + [f"... +{len(v) - 10} items"]
+        if isinstance(v, list):
+            return [_trim(i, depth + 1) for i in v]
+        return v
+
+    return json.dumps(_trim(obj), indent=2, default=str)
+
+
 
 
 class DAGExecutor:
@@ -204,11 +318,9 @@ class DAGExecutor:
         result = DAGExecutionResult()
         t0 = time.perf_counter()
 
-        # task_id → error_policy for every task that errored
         failed_tasks: dict[str, str] = {}
 
         for wave_idx, wave in enumerate(waves):
-            # ---- dependency-aware skip -----------------------------
             runnable: list[DAGTask] = []
             for task in wave:
                 should_skip = any(
@@ -246,7 +358,6 @@ class DAGExecutor:
 
             for task, tres in zip(runnable, wave_results):
                 if isinstance(tres, Exception):
-                    # Safety net — _run_task should not raise, but just in case
                     tr = DAGTaskResult(
                         task_id=task.id,
                         agent=task.agent,
@@ -272,7 +383,6 @@ class DAGExecutor:
                             policy=task.error_policy,
                         )
                     else:
-                        # Feed output into context for downstream tasks
                         self._update_context(ctx, task, tr)
 
                 result.task_results[task.id] = tr
@@ -310,12 +420,15 @@ class DAGExecutor:
             t0 = time.perf_counter()
             logger.info("dag.task_start", task_id=task.id, agent=task.agent)
 
+            projected = _project_ctx(ctx, task.agent, task.extra_context)
+            projected = {k: _cap_value(v) for k, v in projected.items()}
+
             try:
                 response = await asyncio.wait_for(
                     agent.run(
                         task_instruction=task.instruction,
                         session_id=self.session_id,
-                        **ctx,
+                        **projected,
                     ),
                     timeout=self.task_timeout_secs,
                 )
@@ -393,7 +506,6 @@ class DAGExecutor:
         parsed = result.parsed
 
         if role == "researcher" and parsed is not None:
-            # Downstream agents expect 'tech_manifest' as a JSON string
             try:
                 ctx["tech_manifest"] = parsed.model_dump_json(indent=2)
             except Exception:
@@ -406,7 +518,6 @@ class DAGExecutor:
                 ctx["architecture_plan"] = json.dumps({"summary": str(parsed)})
 
         elif role == "generator" and parsed is not None:
-            # Code agents expect 'code' as a string (all file contents joined)
             try:
                 files = getattr(parsed, "files", [])
                 code_str = "\n\n".join(
@@ -423,7 +534,6 @@ class DAGExecutor:
             ctx["debug_feedback"] = str(parsed)
 
         elif role == "refactorer" and parsed is not None:
-            # Refactored code replaces the current code context
             try:
                 files = getattr(parsed, "files", [])
                 if files:
@@ -434,5 +544,4 @@ class DAGExecutor:
             except Exception:
                 pass
 
-        # Always store under role-specific key for brain.py to collect
         ctx[f"_report_{role}_{task.id}"] = result

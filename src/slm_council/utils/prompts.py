@@ -10,9 +10,6 @@ more structured prompts; larger models can handle richer context.
 
 from __future__ import annotations
 
-# ────────────────────────────────────────────────────────────────────
-# Orchestrator
-# ────────────────────────────────────────────────────────────────────
 
 ORCHESTRATOR_SYSTEM = """\
 You are the **Orchestrator** of the SLM Coding Council — a dynamic pipeline of
@@ -102,6 +99,7 @@ When refining:
 - Only include agents that need to re-run (don't repeat successful work).
 - Reference specific issues from the reports.
 - If the generator needs to fix code, include the specific bug/test references.
+- You may optionally add "extra_context": ["key1", "key2"] to any task to pass additional context keys beyond the agent's defaults (e.g. "review_feedback" for the debugger).
 
 Respond with JSON:
 {{
@@ -118,9 +116,6 @@ Respond with JSON:
 }}
 """
 
-# ────────────────────────────────────────────────────────────────────
-# Tech Researcher
-# ────────────────────────────────────────────────────────────────────
 
 RESEARCHER_SYSTEM = """\
 You are the **Tech Researcher** of the SLM Coding Council.
@@ -160,9 +155,6 @@ Produce a Tech Manifest JSON:
 }}
 """
 
-# ────────────────────────────────────────────────────────────────────
-# Planner / Architect
-# ────────────────────────────────────────────────────────────────────
 
 PLANNER_SYSTEM = """\
 You are the **Planner / Architect** of the SLM Coding Council.
@@ -207,9 +199,6 @@ Produce an Architecture Plan JSON:
 }}
 """
 
-# ────────────────────────────────────────────────────────────────────
-# Code Generator
-# ────────────────────────────────────────────────────────────────────
 
 GENERATOR_SYSTEM = """\
 You are the **Code Generator** of the SLM Coding Council.
@@ -261,9 +250,6 @@ Produce a JSON response:
 }}
 """
 
-# ────────────────────────────────────────────────────────────────────
-# Reviewer (Code Review)
-# ────────────────────────────────────────────────────────────────────
 
 REVIEWER_SYSTEM = """\
 You are the **Code Reviewer** of the SLM Coding Council.
@@ -319,9 +305,6 @@ Produce a JSON response:
 }}
 """
 
-# ────────────────────────────────────────────────────────────────────
-# Debugger
-# ────────────────────────────────────────────────────────────────────
 
 DEBUGGER_SYSTEM = """\
 You are the **Debugger** of the SLM Coding Council.
@@ -369,9 +352,6 @@ Produce a JSON response:
 }}
 """
 
-# ────────────────────────────────────────────────────────────────────
-# Tester
-# ────────────────────────────────────────────────────────────────────
 
 TESTER_SYSTEM = """\
 You are the **Tester** of the SLM Coding Council.
@@ -419,9 +399,6 @@ Produce a JSON response:
 }}
 """
 
-# ────────────────────────────────────────────────────────────────────
-# Optimizer
-# ────────────────────────────────────────────────────────────────────
 
 OPTIMIZER_SYSTEM = """\
 You are the **Performance Optimizer** of the SLM Coding Council.
@@ -469,9 +446,6 @@ Produce a JSON response:
 }}
 """
 
-# ────────────────────────────────────────────────────────────────────
-# Refactorer
-# ────────────────────────────────────────────────────────────────────
 
 REFACTORER_SYSTEM = """\
 You are the **Refactorer** of the SLM Coding Council.

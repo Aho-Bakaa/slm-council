@@ -6,7 +6,6 @@ import threading
 def test_council_workflow():
     url = "http://127.0.0.1:8080/council/run"
     
-    # The prompt for your orchestrator
     payload = {
         "query": "Create a java program to find if a string is palindrome or not",
         "language": "java",

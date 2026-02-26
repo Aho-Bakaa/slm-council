@@ -47,10 +47,6 @@ from slm_council.utils.prompts import (
 
 logger = get_logger(__name__)
 
-# ── Adaptive complexity profiles ──────────────────────────────────────
-# Each profile defines hich agents are allowed and the max refinement passes.
-# The orchestrator LLM classifies every request as simple/moderate/complex;
-# these profiles enforce hard budgets so small models can't over-plan.
 
 @dataclass(frozen=True)
 class ComplexityProfile:
@@ -77,12 +73,10 @@ COMPLEXITY_PROFILES: dict[str, ComplexityProfile] = {
                 "debugger", "tester", "optimizer", "refactorer",
             }
         ),
-        # Issue #3: honour the user's configured max, don't hardcap
         max_passes=settings.max_refinement_passes,
     ),
 }
 
-# Fallback when the LLM returns an unrecognised or missing complexity value
 _DEFAULT_PROFILE_KEY = "moderate"
 
 
@@ -114,7 +108,6 @@ class Orchestrator:
         model: str | None = None,
     ) -> None:
         self.endpoint = (endpoint or settings.orchestrator_endpoint).rstrip("/")
-        # The orchestrator may use Vertex AI or an OpenAI-compat endpoint
         self.model = model or settings.orchestrator_model_name
 
         headers: dict[str, str] = {}
@@ -130,9 +123,6 @@ class Orchestrator:
             headers=headers or None,
         )
 
-    # ─────────────────────────────────────────────────────────────────
-    # LLM call for orchestrator reasoning
-    # ─────────────────────────────────────────────────────────────────
 
     @retry(
         retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError)),
@@ -181,11 +171,7 @@ class Orchestrator:
             )
         return output
 
-    # ─────────────────────────────────────────────────────────────────
-    # Phase 1 – Decompose user request into agent tasks
-    # ─────────────────────────────────────────────────────────────────
 
-    # Agents whose failure should prevent dependents from running
     _CRITICAL_AGENTS: frozenset[str] = frozenset({"generator"})
 
     async def decompose(self, request: UserRequest) -> DecomposeResult:
@@ -198,12 +184,10 @@ class Orchestrator:
         hardcoded minimal fallback DAG as a last resort.
         """
         prompts = [
-            # Attempt 1: full structured prompt
             ORCHESTRATOR_DECOMPOSE.format(
                 user_query=request.query,
                 language=request.language,
             ),
-            # Attempt 2: stripped-down prompt (set lazily on failure)
             None,
         ]
 
@@ -223,7 +207,6 @@ class Orchestrator:
                     error=str(exc),
                 )
 
-        # Last resort: hardcoded minimal DAG (matches the simple profile)
         if data is None:
             logger.warning("orchestrator.decompose_fallback")
             data = {
@@ -252,7 +235,6 @@ class Orchestrator:
 
         complexity = data.get("complexity", "unknown").lower().strip()
 
-        # Issue #6: Allow user to override the LLM's complexity decision
         user_override = request.context.get("complexity")
         if isinstance(user_override, str) and user_override.lower().strip() in COMPLEXITY_PROFILES:
             logger.info(
@@ -278,9 +260,6 @@ class Orchestrator:
         )
         return result
 
-    # ─────────────────────────────────────────────────────────────────
-    # Decompose helpers
-    # ─────────────────────────────────────────────────────────────────
 
     def _parse_dag_tasks(self, data: dict[str, Any]) -> list[DAGTask]:
         """Extract valid DAGTasks from orchestrator JSON, filtering bad roles."""
@@ -299,10 +278,10 @@ class Orchestrator:
                     agent=agent_name,
                     instruction=t.get("instruction", ""),
                     dependencies=t.get("dependencies", []),
+                    extra_context=t.get("extra_context", []),
                 )
             )
 
-        # Ensure at least a generator task exists
         if not any(t.agent == "generator" for t in tasks):
             tasks.append(
                 DAGTask(
@@ -351,7 +330,6 @@ class Orchestrator:
                 remaining=[f"{t.id}:{t.agent}" for t in kept],
             )
 
-        # Fix dangling dependency references
         kept_ids = {t.id for t in kept}
         for t in kept:
             t.dependencies = [d for d in t.dependencies if d in kept_ids]
@@ -380,9 +358,6 @@ class Orchestrator:
             '{"id": "t2", "agent": "generator", "instruction": "...", "dependencies": ["t1"]}]}'
         )
 
-    # ─────────────────────────────────────────────────────────────────
-    # Phase 3 – Synthesise & decide APPROVE / REFINE
-    # ─────────────────────────────────────────────────────────────────
 
     async def synthesise(
         self,
@@ -396,7 +371,6 @@ class Orchestrator:
         verdicts / summaries so it remembers what it already tried.
         """
 
-        # Build a single aggregated report string for all agents
         report_parts: list[str] = []
         report_chars = settings.synthesis_max_report_chars
         code_chars = settings.synthesis_max_code_chars
@@ -431,7 +405,10 @@ class Orchestrator:
 
         agent_reports = "\n\n".join(report_parts) or "No agent reports available."
 
-        # Gap D: Build prior synthesis history string
+        _SYNTH_CAP = 16000
+        if len(agent_reports) > _SYNTH_CAP:
+            agent_reports = agent_reports[:_SYNTH_CAP] + "\n[\u2026truncated]"
+
         history_text = ""
         if prior_syntheses:
             history_parts = []
@@ -520,10 +497,10 @@ class Orchestrator:
                     agent=agent_name,
                     instruction=t.get("instruction", ""),
                     dependencies=t.get("dependencies", []),
+                    extra_context=t.get("extra_context", []),
                 )
             )
 
-        # If orchestrator returned empty refinement, default to re-running generator
         if not tasks:
             tasks.append(
                 DAGTask(
@@ -536,14 +513,10 @@ class Orchestrator:
 
         self._assign_error_policies(tasks)
 
-        # Issue #1: Apply complexity filter to refinement tasks too
         tasks = self._filter_by_complexity(tasks, complexity)
 
         return tasks
 
-    # ─────────────────────────────────────────────────────────────────
-    # Build final result
-    # ─────────────────────────────────────────────────────────────────
 
     def build_result(
         self,
@@ -554,7 +527,6 @@ class Orchestrator:
         total_duration: float,
     ) -> CouncilResult:
         """Build the final CouncilResult from all DAG task outputs."""
-        # Extract typed reports from task results by role
         tech_manifest: TechManifest | None = None
         architecture_plan: ArchitecturePlan | None = None
         generated_code: GeneratedCode | None = None
@@ -588,7 +560,6 @@ class Orchestrator:
             elif isinstance(parsed, OptimizationReport):
                 optimization_report = parsed
             elif isinstance(parsed, RefactorResult):
-                # If refactorer produced files, use those as the final code
                 if parsed.files:
                     refactored_code = parsed
                     generated_code = GeneratedCode(
@@ -597,7 +568,6 @@ class Orchestrator:
                         assumptions=[],
                     )
 
-        # Compute overall status
         has_code = bool(generated_code and getattr(generated_code, "files", None))
         verdicts: list[Verdict] = []
         if debug_report:
@@ -637,8 +607,6 @@ class Orchestrator:
             agents_used=agents_used,
             dag_execution_order=execution_order,
         )
-    # Helpers
-    # ─────────────────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any]:
@@ -662,14 +630,12 @@ class Orchestrator:
                 pass
             return None
 
-        # 1) Prefer first fenced JSON object if present
         fence_iter = re.finditer(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
         for match in fence_iter:
             parsed = try_load(match.group(1))
             if parsed is not None:
                 return parsed
 
-        # 2) Remove fence lines and attempt full payload
         if cleaned.startswith("```"):
             lines = cleaned.splitlines()
             lines = [line for line in lines if not line.strip().startswith("```")]
@@ -679,7 +645,6 @@ class Orchestrator:
         if parsed_full is not None:
             return parsed_full
 
-        # 3) Parse first JSON object from concatenated content using raw decoder
         decoder = json.JSONDecoder()
         first_brace = cleaned.find("{")
         if first_brace != -1:
@@ -690,7 +655,6 @@ class Orchestrator:
             except json.JSONDecodeError:
                 pass
 
-        # 4) Final fallback: bounded braces snippet
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start != -1 and end != -1 and end > start:

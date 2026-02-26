@@ -33,9 +33,6 @@ from slm_council.utils.logging import get_logger, truncate_for_log
 logger = get_logger(__name__)
 
 
-# ────────────────────────────────────────────────────────────────────
-# Caching infrastructure
-# ────────────────────────────────────────────────────────────────────
 
 @dataclass
 class CacheEntry:
@@ -62,17 +59,14 @@ class LRUCache:
         if key not in self._cache:
             return None
         entry = self._cache[key]
-        # Check TTL
         if time.time() - entry.timestamp > self._ttl_secs:
             del self._cache[key]
             return None
-        # Move to end (most recently used)
         self._cache.move_to_end(key)
         return entry
 
     def set(self, model: str, system: str, user: str, response: AgentResponse) -> str:
         key = self._compute_hash(model, system, user)
-        # Evict oldest if at capacity
         while len(self._cache) >= self._max_size:
             self._cache.popitem(last=False)
         self._cache[key] = CacheEntry(
@@ -86,7 +80,6 @@ class LRUCache:
         self._cache.clear()
 
 
-# Global cache shared by all agents
 _request_cache = LRUCache(max_size=200, ttl_secs=settings.cache_ttl_secs)
 
 
@@ -114,11 +107,8 @@ class BaseAgent(ABC):
             headers=headers or None,
         )
 
-        # Conversation memory: store recent (prompt, response) pairs per session
-        # Key: session_id, Value: list of (user_prompt, raw_output) tuples
         self._memory: dict[str, list[tuple[str, str]]] = {}
 
-    # ── public API ───────────────────────────────────────────────────
 
     async def run(
         self,
@@ -136,7 +126,6 @@ class BaseAgent(ABC):
         try:
             user_prompt = self.build_prompt(task_instruction, **ctx)
 
-            # Check cache first
             if use_cache and settings.enable_request_cache:
                 cached = _request_cache.get(self.model, self.system_prompt, user_prompt)
                 if cached is not None:
@@ -145,7 +134,6 @@ class BaseAgent(ABC):
                         agent=self.role.value,
                         hash=cached.request_hash,
                     )
-                    # Return cached response with cache_hit flag
                     cached_resp = cached.response.model_copy()
                     cached_resp.cache_hit = True
                     cached_resp.request_hash = cached.request_hash
@@ -160,7 +148,6 @@ class BaseAgent(ABC):
                     prompt=truncate_for_log(user_prompt, settings.log_max_chars),
                 )
 
-            # Build messages with memory context
             messages = self._build_messages_with_memory(user_prompt, session_id)
 
             raw, usage = await self._call_model_with_messages(messages)
@@ -172,7 +159,6 @@ class BaseAgent(ABC):
                     output=truncate_for_log(raw, settings.log_max_chars),
                 )
 
-            # Store in memory for future passes
             if session_id:
                 self._add_to_memory(session_id, user_prompt, raw)
 
@@ -195,7 +181,6 @@ class BaseAgent(ABC):
                 request_hash=request_hash,
             )
 
-            # Cache successful response
             if use_cache and settings.enable_request_cache:
                 request_hash = _request_cache.set(
                     self.model, self.system_prompt, user_prompt, response
@@ -274,11 +259,9 @@ class BaseAgent(ABC):
             {"role": "system", "content": self.system_prompt},
         ]
 
-        # Add memory from previous passes (sliding window)
         if session_id and session_id in self._memory:
             history = self._memory[session_id][-settings.agent_memory_window:]
             for prev_prompt, prev_output in history:
-                # Truncate to avoid token explosion
                 truncated_prompt = prev_prompt[:2000] + "..." if len(prev_prompt) > 2000 else prev_prompt
                 truncated_output = prev_output[:2000] + "..." if len(prev_output) > 2000 else prev_output
                 messages.append({"role": "user", "content": f"[Previous attempt]\n{truncated_prompt}"})
@@ -292,7 +275,6 @@ class BaseAgent(ABC):
         if session_id not in self._memory:
             self._memory[session_id] = []
         self._memory[session_id].append((prompt, output))
-        # Keep only last N entries to prevent memory bloat
         max_entries = settings.agent_memory_window * 2
         if len(self._memory[session_id]) > max_entries:
             self._memory[session_id] = self._memory[session_id][-max_entries:]
@@ -304,7 +286,6 @@ class BaseAgent(ABC):
         else:
             self._memory.clear()
 
-    # ── abstract hooks (implement in subclasses) ─────────────────────
 
     @abstractmethod
     def build_prompt(self, task_instruction: str, **ctx: Any) -> str:
@@ -316,7 +297,6 @@ class BaseAgent(ABC):
         """Parse the raw LLM text into a typed Pydantic model."""
         ...
 
-    # ── internal transport ───────────────────────────────────────────
 
     @retry(
         retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.ConnectError, httpx.ReadTimeout)),
@@ -361,7 +341,6 @@ class BaseAgent(ABC):
         ]
         return await self._call_model_with_messages(messages)
 
-    # ── helpers ──────────────────────────────────────────────────────
 
     @staticmethod
     def _extract_json(text: str) -> dict[str, Any]:
@@ -369,15 +348,12 @@ class BaseAgent(ABC):
 
         Handles common wrapping: ```json ... ``` or plain text.
         """
-        # Strip markdown fences
         cleaned = text.strip()
         if cleaned.startswith("```"):
-            # remove first and last fence lines
             lines = cleaned.splitlines()
             lines = [l for l in lines if not l.strip().startswith("```")]
             cleaned = "\n".join(lines)
 
-        # Handle fenced JSON that appears after headings/prose
         fence_match = re.search(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", text, flags=re.IGNORECASE)
         if fence_match:
             fenced_snippet = fence_match.group(1)
@@ -391,13 +367,11 @@ class BaseAgent(ABC):
                 except (SyntaxError, ValueError):
                     pass
 
-        # Try parsing directly
         try:
             return json.loads(cleaned)  # type: ignore[no-any-return]
         except json.JSONDecodeError:
             pass
 
-        # Fallback for Python-style dict outputs (single quotes, True/False)
         try:
             literal = ast.literal_eval(cleaned)
             if isinstance(literal, dict):
@@ -405,7 +379,6 @@ class BaseAgent(ABC):
         except (SyntaxError, ValueError):
             pass
 
-        # Fallback: find first { ... last }
         start = cleaned.find("{")
         end = cleaned.rfind("}")
         if start != -1 and end != -1:

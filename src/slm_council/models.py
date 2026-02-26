@@ -10,9 +10,6 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
-# ────────────────────────────────────────────────────────────────────
-# Enums
-# ────────────────────────────────────────────────────────────────────
 
 class AgentRole(str, Enum):
     """Canonical names for every agent in the council."""
@@ -74,9 +71,6 @@ class ParseErrorCategory(str, Enum):
     UNKNOWN = "unknown"
 
 
-# ────────────────────────────────────────────────────────────────────
-# User Request
-# ────────────────────────────────────────────────────────────────────
 
 class UserRequest(BaseModel):
     """Incoming request from the user."""
@@ -88,9 +82,6 @@ class UserRequest(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-# ────────────────────────────────────────────────────────────────────
-# Orchestrator → Agent task assignment
-# ────────────────────────────────────────────────────────────────────
 
 class AgentTask(BaseModel):
     """A discrete unit of work the Orchestrator assigns to an agent."""
@@ -103,9 +94,6 @@ class AgentTask(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
 
 
-# ────────────────────────────────────────────────────────────────────
-# Tech Researcher output
-# ────────────────────────────────────────────────────────────────────
 
 class DependencySpec(BaseModel):
     name: str
@@ -125,9 +113,6 @@ class TechManifest(BaseModel):
     references: list[str] = Field(default_factory=list)
 
 
-# ────────────────────────────────────────────────────────────────────
-# Code Generator output
-# ────────────────────────────────────────────────────────────────────
 
 class CodeFile(BaseModel):
     """A single generated source file."""
@@ -146,9 +131,6 @@ class GeneratedCode(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
 
 
-# ────────────────────────────────────────────────────────────────────
-# Debugger output
-# ────────────────────────────────────────────────────────────────────
 
 class BugReport(BaseModel):
     """A single issue found by the Debugger."""
@@ -170,9 +152,6 @@ class DebugReport(BaseModel):
     overall_assessment: str = ""
 
 
-# ────────────────────────────────────────────────────────────────────
-# Tester output
-# ────────────────────────────────────────────────────────────────────
 
 class TestCase(BaseModel):
     """A single generated test case."""
@@ -195,9 +174,6 @@ class TestReport(BaseModel):
     failure_details: list[str] = Field(default_factory=list)
 
 
-# ────────────────────────────────────────────────────────────────────
-# Planner / Architect output
-# ────────────────────────────────────────────────────────────────────
 
 class ComponentSpec(BaseModel):
     """A single component in the planned architecture."""
@@ -220,16 +196,13 @@ class ArchitecturePlan(BaseModel):
     design_decisions: list[str] = Field(default_factory=list)
 
 
-# ────────────────────────────────────────────────────────────────────
-# Reviewer output
-# ────────────────────────────────────────────────────────────────────
 
 class StyleIssue(BaseModel):
     """A code style or best-practice violation."""
 
     file: str = ""
     line_range: str = ""
-    category: str = ""  # naming, formatting, anti-pattern, security, etc.
+    category: str = ""  
     description: str
     suggestion: str = ""
 
@@ -245,17 +218,14 @@ class ReviewReport(BaseModel):
     overall_assessment: str = ""
 
 
-# ────────────────────────────────────────────────────────────────────
-# Optimizer output
-# ────────────────────────────────────────────────────────────────────
 
 class Bottleneck(BaseModel):
     """A performance bottleneck identified by the Optimizer."""
 
-    location: str = ""  # file:line or function name
+    location: str = ""  
     description: str
-    current_complexity: str = ""  # e.g. O(n^2)
-    suggested_complexity: str = ""  # e.g. O(n log n)
+    current_complexity: str = ""  
+    suggested_complexity: str = ""  
     improvement: str = ""
 
 
@@ -270,9 +240,6 @@ class OptimizationReport(BaseModel):
     overall_assessment: str = ""
 
 
-# ────────────────────────────────────────────────────────────────────
-# Refactorer output
-# ────────────────────────────────────────────────────────────────────
 
 class RefactorResult(BaseModel):
     """Restructured code from the Refactorer agent."""
@@ -283,11 +250,7 @@ class RefactorResult(BaseModel):
     explanation: str = ""
 
 
-# ────────────────────────────────────────────────────────────────────
-# Agent generic response wrapper
-# ────────────────────────────────────────────────────────────────────
 
-# Union of all possible parsed agent outputs
 ParsedAgentOutput = (
     TechManifest
     | ArchitecturePlan
@@ -317,21 +280,17 @@ class AgentResponse(BaseModel):
     request_hash: str = ""
 
 
-# ────────────────────────────────────────────────────────────────────
-# Council session (full pipeline state)
-# ────────────────────────────────────────────────────────────────────
 
 class RefinementFeedback(BaseModel):
     """Feedback the Orchestrator attaches when sending work back."""
 
     pass_number: int
-    source_agent: AgentRole  # The agent whose output was reviewed
-    target_agent: AgentRole | None = None  # The agent that should act on feedback
+    source_agent: AgentRole  
+    target_agent: AgentRole | None = None  
     issues: list[str]
     instructions: str
-    # Structured references for preserving context across passes
-    bug_refs: list[str] = Field(default_factory=list)  # Bug IDs from debugger
-    test_refs: list[str] = Field(default_factory=list)  # Failed test names
+    bug_refs: list[str] = Field(default_factory=list)  
+    test_refs: list[str] = Field(default_factory=list)  
     severity: Severity = Severity.WARNING
 
 
@@ -350,9 +309,6 @@ class CouncilSession(BaseModel):
     completed_at: datetime | None = None
 
 
-# ────────────────────────────────────────────────────────────────────
-# Final response to the user
-# ────────────────────────────────────────────────────────────────────
 
 class CouncilResult(BaseModel):
     """The polished response returned to the caller."""
@@ -370,6 +326,5 @@ class CouncilResult(BaseModel):
     refinement_passes: int = 0
     total_duration_secs: float = 0.0
     summary: str = ""
-    # Execution metadata
     agents_used: list[AgentRole] = Field(default_factory=list)
-    dag_execution_order: list[list[str]] = Field(default_factory=list)  # Waves of task IDs
+    dag_execution_order: list[list[str]] = Field(default_factory=list)  
